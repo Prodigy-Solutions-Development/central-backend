@@ -1,11 +1,11 @@
 const appRoot = require('app-root-path');
-const { testService } = require('../setup');
+const { testService, testServiceFullTrx } = require('../setup');
 const testData = require('../../data/xml');
 const uuid = require('uuid').v4;
 const should = require('should');
 const { sql } = require('slonik');
 
-const { exhaust } = require(appRoot + '/lib/worker/worker');
+const { exhaust, exhaustParallel } = require(appRoot + '/lib/worker/worker');
 
 const testOfflineEntities = (test) => testService(async (service, container) => {
   const asAlice = await service.login('alice');
@@ -305,6 +305,78 @@ describe('Offline Entities', () => {
           body.currentVersion.branchId.should.equal(branchId);
           should.not.exist(body.currentVersion.trunkVersion);
           body.currentVersion.branchBaseVersion.should.equal(1);
+        });
+    }));
+
+    it('should handle offline create+update+update with interleaved online updates', testOfflineEntities(async (service, container) => {
+      const asAlice = await service.login('alice');
+      const branchId = uuid();
+
+      // First submission creates the entity
+      // no trunk version
+      // sets name, age, status
+      await asAlice.post('/v1/projects/1/forms/offlineEntity/submissions')
+        .send(testData.instances.offlineEntity.two)
+        .set('Content-Type', 'application/xml')
+        .expect(200);
+
+      await exhaust(container);
+
+      // Update the entity online
+      // Change age
+      await asAlice.patch('/v1/projects/1/datasets/people/entities/12345678-1234-4123-8234-123456789ddd?baseVersion=1')
+        .send({ data: { age: '30' } });
+
+      // Second submission (1st offline update after offline create)
+      // updates the status only
+      await asAlice.post('/v1/projects/1/forms/offlineEntity/submissions')
+        .send(testData.instances.offlineEntity.two
+          .replace('create="1"', 'update="1"')
+          .replace('branchId=""', `branchId="${branchId}"`)
+          .replace('two', 'two-update')
+          .replace('baseVersion=""', 'baseVersion="1"')
+          .replace('<status>new</status>', '<status>arrived</status>')
+          .replace('<name>Megan</name>', '')
+          .replace('<age>20</age>', '')
+        )
+        .set('Content-Type', 'application/xml')
+        .expect(200);
+
+      await exhaust(container);
+
+      // Update the entity online
+      // change age again
+      await asAlice.patch('/v1/projects/1/datasets/people/entities/12345678-1234-4123-8234-123456789ddd?baseVersion=3')
+        .send({ data: { age: '40' } });
+
+      // Third submission (2nd offline update)
+      // updates the status only
+      await asAlice.post('/v1/projects/1/forms/offlineEntity/submissions')
+        .send(testData.instances.offlineEntity.two
+          .replace('create="1"', 'update="1"')
+          .replace('branchId=""', `branchId="${branchId}"`)
+          .replace('two', 'two-update2')
+          .replace('baseVersion=""', 'baseVersion="2"')
+          .replace('<status>new</status>', '<status>complete</status>')
+          .replace('<name>Megan</name>', '')
+          .replace('<age>20</age>', '')
+        )
+        .set('Content-Type', 'application/xml')
+        .expect(200);
+
+      await exhaust(container);
+
+      // Check that the actual computed base version is the right one (v3) while branchBaseVersion is v2.
+      await asAlice.get('/v1/projects/1/datasets/people/entities/12345678-1234-4123-8234-123456789ddd')
+        .expect(200)
+        .then(({ body }) => {
+          body.currentVersion.version.should.equal(5);
+          body.currentVersion.baseVersion.should.equal(3);
+          body.currentVersion.data.should.eql({ age: '40', status: 'complete', first_name: 'Megan' });
+
+          body.currentVersion.branchId.should.equal(branchId);
+          should.not.exist(body.currentVersion.trunkVersion);
+          body.currentVersion.branchBaseVersion.should.equal(2);
         });
     }));
   });
@@ -1269,5 +1341,56 @@ describe('Offline Entities', () => {
           });
       }));
     });
+  });
+
+  describe('locking an entity while processing a related submission', function() {
+    this.timeout(8000);
+
+    // https://github.com/getodk/central/issues/705
+    it('should concurrently process an offline create + update @slow', testServiceFullTrx(async (service, container) => {
+      const asAlice = await service.login('alice');
+      await asAlice.post('/v1/projects/1/forms?publish=true')
+        .send(testData.forms.offlineEntity)
+        .set('Content-Type', 'application/xml')
+        .expect(200);
+      await exhaust(container);
+
+      // Set up the race condition.
+      const race = async () => {
+        const entityUuid = uuid();
+        await asAlice.post('/v1/projects/1/forms/offlineEntity/submissions')
+          .send(testData.instances.offlineEntity.two
+            .replace('two', uuid())
+            .replace('12345678-1234-4123-8234-123456789ddd', entityUuid))
+          .set('Content-Type', 'application/xml')
+          .expect(200);
+        await asAlice.post('/v1/projects/1/forms/offlineEntity/submissions')
+          .send(testData.instances.offlineEntity.two
+            .replace('two', uuid())
+            .replace('12345678-1234-4123-8234-123456789ddd', entityUuid)
+            .replace('create="1"', 'update="1"')
+            .replace('branchId=""', `branchId="${uuid()}"`)
+            .replace('baseVersion=""', 'baseVersion="1"'))
+          .set('Content-Type', 'application/xml')
+          .expect(200);
+        await exhaustParallel(container);
+
+        const { body: entity } = await asAlice.get(`/v1/projects/1/datasets/people/entities/${entityUuid}`)
+          .expect(200);
+        const backlogCount = await container.oneFirst(sql`select count(*) from entity_submission_backlog`);
+        return entity.currentVersion.version === 2 && backlogCount === 0;
+      };
+      // Run the race condition 50 times. If I remove locking in
+      // Entities._processSubmissionEvent(), then successCount < 10. With
+      // locking in place, successCount === 50. It's because it's often the case
+      // that successCount > 0 even without locking that we run the race
+      // condition multiple times.
+      let successCount = 0;
+      for (let i = 0; i < 50; i += 1) {
+        // eslint-disable-next-line no-await-in-loop
+        if (await race()) successCount += 1;
+      }
+      successCount.should.equal(50);
+    }));
   });
 });
