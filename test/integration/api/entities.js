@@ -3816,9 +3816,12 @@ describe('Entities API', () => {
       // 250kb limit = 256000 bytes (1024 bytes per kb)
       await asAlice.post('/v1/projects/1/datasets')
         .send({ name: 'x'.repeat(256001) })
-        .expect(500)
+        .expect(400)
         .then(({ body }) => {
-          body.message.should.equal('Internal Server Error');
+          body.should.eql({
+            code: 400.36,
+            message: 'Request body too large.',
+          });
         });
     }));
 
@@ -3844,22 +3847,6 @@ describe('Entities API', () => {
         .then(({ body }) => {
           body.success.should.be.true();
         });
-    }));
-
-    it('should not allow larger body on GET request', testDataset(async (service) => {
-      const asAlice = await service.login('alice');
-
-      await asAlice.get('/v1/projects/1/datasets/people/entities?foo=bar')
-        .send({ source: { name: 'file.csv' }, entities: [{ label: 'x'.repeat(256001) }] })
-        .expect(500)
-        .then(({ body }) => {
-          body.message.should.equal('Internal Server Error');
-        });
-
-      // GET on this endpoint with payload doens't really make sense
-      await asAlice.get('/v1/projects/1/datasets/people/entities?foo=bar')
-        .send({ source: { name: 'file.csv' }, entities: [{ label: 'x'.repeat(10) }] })
-        .expect(200);
     }));
   });
 });

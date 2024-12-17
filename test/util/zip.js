@@ -5,15 +5,9 @@ const streamTest = require('streamtest').v2;
 
 // unzip and detangle zipfiles.
 // also, hooraaaayy callback hell.
-// calls the callback with an object as follows:
-// {
-//      filenames: [ names of files in zip ],
-//      {filename}: "contents",
-//      {filename}: "contents",
-//      …
-// }
+// calls the callback with an object { filenames:[], files:Map(name -> contents) }
 const processZipFile = (zipfile, callback) => {
-  const result = { filenames: [] };
+  const result = { filenames: [], files: new Map() };
   const entries = [];
   let completed = 0;
 
@@ -28,15 +22,13 @@ const processZipFile = (zipfile, callback) => {
         result.filenames.push(entry.fileName);
         // eslint-disable-next-line no-shadow
         zipfile.openReadStream(entry, (err, resultStream) => {
-          // eslint-disable-next-line keyword-spacing
-          if(err) return callback(err);
+          if (err) return callback(err);
 
           // eslint-disable-next-line no-shadow
           resultStream.pipe(streamTest.toText((err, contents) => {
-            // eslint-disable-next-line keyword-spacing
-            if(err) return callback(err);
+            if (err) return callback(err);
 
-            result[entry.fileName] = contents;
+            result.files.set(entry.fileName, contents);
             completed += 1;
             if (completed === entries.length) {
               callback(null, result);
@@ -51,8 +43,7 @@ const processZipFile = (zipfile, callback) => {
 
 const zipStreamToFiles = (zipStream, callback) => {
   tmp.file((err, tmpfile) => {
-    // eslint-disable-next-line keyword-spacing
-    if(err) return callback(err);
+    if (err) return callback(err);
 
     const writeStream = createWriteStream(tmpfile);
     zipStream.pipe(writeStream);
@@ -92,20 +83,25 @@ const binaryParser = (res, callback) => {
 };
 
 const httpZipResponseToFiles = (zipHttpResponse) => new Promise((resolve, reject) => {
-  zipHttpResponse.buffer().parse(binaryParser).end((err, res) => {
-    if (err) return reject(err);
-
-    // eslint-disable-next-line no-shadow
-    yauzl.fromBuffer(res.body, (err, zipfile) => {
+  zipHttpResponse
+    .expect(200)
+    .expect('Content-Type', 'application/zip')
+    .buffer()
+    .parse(binaryParser)
+    .end((err, res) => {
       if (err) return reject(err);
 
       // eslint-disable-next-line no-shadow
-      processZipFile(zipfile, (err, result) => {
-        if (err) reject(err);
-        else resolve(result);
+      yauzl.fromBuffer(res.body, (err, zipfile) => {
+        if (err) return reject(err);
+
+        // eslint-disable-next-line no-shadow
+        processZipFile(zipfile, (err, result) => {
+          if (err) reject(err);
+          else resolve(result);
+        });
       });
     });
-  });
 });
 
 module.exports = { zipStreamToFiles, httpZipResponseToFiles };

@@ -227,6 +227,14 @@ should.Assertion.add('FormAttachment', function() {
   if (this.obj.updatedAt != null) this.obj.updatedAt.should.be.an.isoDate();
 });
 
+should.Assertion.add('Problem', function() {
+  this.params = { operator: 'to be a Problem' };
+
+  this.obj.should.be.a.Error();
+  Object.keys(this.obj).should.containDeep([ 'problemCode', 'problemDetails' ]);
+  this.obj.problemCode.should.be.a.Number();
+});
+
 should.Assertion.add('Project', function() {
   this.params = { operator: 'to be a Project' };
 
@@ -435,4 +443,10 @@ should.Assertion.add('EntitySourceSubmissionDetails', function SubmissionDetails
   this.obj.should.have.property('xmlFormId').which.is.a.String();
   this.obj.should.have.property('instanceId').which.is.a.String();
   this.obj.should.have.property('instanceName'); // can be null
+});
+
+should.Assertion.add('skiptoken', function skiptoken(expected) {
+  this.params = { operator: 'to have a skiptoken' };
+
+  JSON.parse(Buffer.from(decodeURIComponent(new URL(this.obj).searchParams.get('$skiptoken').substr(2)), 'base64')).should.deepEqual(expected);
 });
